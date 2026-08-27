@@ -1,0 +1,5 @@
+drone
+person
+bird
+car
+airplane

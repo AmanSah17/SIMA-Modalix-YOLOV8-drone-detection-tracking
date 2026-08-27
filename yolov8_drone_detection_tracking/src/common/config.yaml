@@ -1,0 +1,61 @@
+model:                        # Compiled via SiMa's official tool-model-to-pipeline (surgeon_yolov8_p2.py,
+  # a custom-written surgeon adapted from the stock surgeon_yolov8.py -- that
+  # stock surgeon assumes model.22/3 scales; this model's detect head is at
+  # model.28 with a 4th P2 scale, confirmed by direct ONNX node inspection).
+  # Compiled model, quantized against real drone_dataset calibration images,
+  # 1 clean MLA stage. 0_boxdecoder.json/pipeline_sequence.json were hand
+  # -patched with num_classes=5/labels/thresholds since the mpkcreate step
+  # (which normally does this) needs a second SDK container we don't have
+  # disk space for yet -- see project notes in yolov8_drone_p2_project/.
+  #
+  # decode_type EXPERIMENT (this deploy's whole point): try
+  # pyneat.ModelOptions().decode_type against this model's baked-in
+  # simaai_boxdecode CVU stage before falling back to yolo_decode.py's
+  # manual multiscale-DFL decode (proven working for the sibling
+  # yolov8_640_adamw_2_raw_notess_mpk.tar.gz model -- same architecture,
+  # same decode math, safe fallback if decode_type doesn't pan out).
+  path: /root/prebuilt-apps/models/yolov8_drone_p2_mpk.tar.gz
+  labels: /root/prebuilt-apps/models/yolov8_drone_p2_labels.txt   # drone,person,bird,car,airplane
+
+source:                       # Live RTSP stream -- served by Neat Insight/mediamtx running
+  # in the ghcr.io/sima-neat/sdk container ON THIS LAPTOP (192.168.50.1), not the
+  # board. An ffmpeg loop there streams /workspace/.insight-media/drone_1.mp4 to
+  # rtsp://127.0.0.1:8554/src1 inside the container; port 8554 is mapped to all
+  # interfaces on the host, so it's reachable from the board at this address.
+  # rtsp://192.168.50.20:8554/src1 (the board's own IP) was the actual cause of
+  # every "Connection refused" hit earlier -- nothing was ever meant to serve
+  # RTSP from the board itself.
+  url: rtsp://192.168.50.1:8554/src1
+  codec: h264
+  latency_ms: 200
+  tcp: true
+
+runtime:
+  infer_size: 640              # Must match the model's compiled input size.
+  num_classes: 5                # drone, person, bird, car, airplane -- must equal the labels file's line count.
+
+decode:                       # Lowered from 0.30 -- box geometry was being destroyed by a
+  # decode bug (yolo_decode.py mis-handling this model's already-decoded 4-channel
+  # box output as raw DFL logits, see decode_multiscale_dfl()'s fix), which may have
+  # been suppressing otherwise-valid drone detections along with it. Revisit this
+  # value after confirming detections look sane with the geometry fix in place.
+  score_threshold: 0.25
+  nms_iou: 0.50
+  max_detections: 100
+
+tracker:                      # BoT-SORT (motion-only mode, see bot_sort.py).
+  high_score_thresh: 0.5       # Stage-1 association: detections at/above this are matched first.
+  low_score_thresh: 0.1        # Stage-2 association: recovers occluded/blurred tracks.
+  new_track_thresh: 0.6        # Minimum score to spawn a brand-new track ID.
+  iou_match_thresh: 0.3        # Minimum IoU to accept a detection<->track match.
+  max_missing: 30               # Frames a track can go unmatched before it's dropped.
+  min_hits: 2                   # Consecutive matches required before a track is reported.
+
+output:
+  # Local mp4 recording disabled -- see custom_yolov8_detection_tracking's
+  # config.yaml for why (output_pool_exhausted on this board's CPU).
+  save_video_path: ""
+  insight:
+    host: 192.168.50.1          # This laptop (direct-link IP) -- where Insight actually runs.
+    video_port: 9002             # Different from custom_yolov8_detection_tracking's 9000 -- avoid
+    metadata_port: 9102          # port collision if both apps ever run against the same Insight instance.
